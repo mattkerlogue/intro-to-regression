@@ -1,0 +1,205 @@
+---
+title: "Introduction to regression in R"
+date: "20-March-2020"
+output:
+  rmdformats::html_clean:
+    highlight: tango
+---
+
+``` {r, include=FALSE}
+library(tidyverse)
+```
+
+This notebook introduces you to linear and logistic regression in R. We'll be using the data in the [nycflights13](https://cran.r-project.org/package=nycflights13) package.
+
+# Flight data
+`nycflights13::flights` is a dataset of the 336,776 flights that departed from the three New York area airports (JFK, LGA and EWR) to other airports in the USA during 2013. It contains scheduled and actual departure and arrival times from the origin and destination airports, the carrier, distance travelled, time in the air, etc.
+
+``` {r}
+library(nycflights13)
+glimpse(flights)
+```
+
+
+In addition to data about flights, the `{nycflights}` package also contains four other datasets:
+
+* `airlines`: a simple lookup of airline codes with airline names
+* `airports`: a dataset with the name and location of US aiports
+* `planes`: a dateset with information about aeroplanes: year built, mufacturer, model, engines, seats, max speed, engine
+* `weather`: hourly meterological data for each airport
+
+Let's look at a summary of the flight performance variables:
+
+``` {r, echo=FALSE}
+flights %>% 
+  select(dep_delay, arr_delay, air_time, distance) %>% 
+  skimr::skim() %>% 
+  skimr::yank("numeric") %>%
+  as_tibble() %>%
+  rename(variable = skim_variable) %>%
+  knitr::kable()
+```
+
+And the correlation between these variables, using `stats::cor`:
+
+``` {r}
+flight_performance <- flights %>% select(dep_delay, arr_delay, air_time, distance)
+cor(flight_performance, use = "pairwise.complete.obs")
+```
+
+However if you want more detailed information about the correlations you should consider using `Hmisc::rcorr`
+
+``` {r}
+Hmisc::rcorr(as.matrix(flight_performance))
+```
+
+The easystats project's `{correlation}` package provides a 'tidy' correlation dataset:
+
+``` {r}
+#remotes::install_github("easystats/correlation")
+correlation::correlation(flight_performance) %>% knitr::kable()
+```
+
+`{ggcorrplot}` allows us to easily visualise correlations
+
+``` {r}
+correlation::correlation(flight_performance) %>%
+  as.matrix() %>%
+  ggcorrplot::ggcorrplot(method = "circle", lab = TRUE)
+```
+
+# Linear regression
+
+To run a linear regression in R we very simply use the `stats::lm()` function, and we define a model in the following way, using R's *formula* notation `y ~ x` where `y` is the independent variable and `x` is the dependent variable.
+
+Let's run a simple linear regression to see the relationship between arrival and departure delay:
+
+``` {r}
+lm(arr_delay ~ dep_delay,
+   data = flights)
+```
+
+We can access more useful output from the model using the `summary` command. We will assign our model to the name `mod1` so we can pass it to other commands that can interrogate the model and extract information.
+
+``` {r}
+mod1 <- lm(arr_delay ~ dep_delay,
+           data = flights)
+summary(mod1)
+```
+
+The `{broom}` package's `tidy()` function also neatly tidies the model's coefficients into a simple dataframe:
+
+``` {r}
+broom::tidy(mod1) %>% knitr::kable()
+```
+
+## Multiple linear regression
+
+Unsurprisingly, we see a clear relationship between the departure delay arrival delay. In general every minute of departure delay gives an arrival delay of `r mod1$coefficients["dep_delay"]` minutes.
+
+However, usually when we're doing a regression we want to understand the relationship between the independent variable and multiple dependent variables, in this case we expand the formula to: `y ~ x1 + x2` as we are 'adding' dependent variables. For interactions we use the asterisk: `y ~ x1 * x2`.
+
+Let's extend our model to add distance:
+
+``` {r}
+mod2 <- lm(arr_delay ~ dep_delay + distance,
+           data = flights)
+broom::tidy(mod2) %>% knitr::kable()
+```
+
+Here we can see that disance has a very small impact on arrival delays, each 100 miles flown is associated with a `r mod2$coefficients["distance"]*100` minute impact on arrival delay.
+
+Let's extend the model further and see if the hour of departure or the month of departure has an impact.
+
+``` {r}
+mod3 <- lm(arr_delay ~ dep_delay + distance + hour + month, 
+           data = flights)
+broom::tidy(mod3) %>% knitr::kable()
+```
+
+The easystats `{performance}` package allows us to compare the performance of multiple models. The performance score uses the "Bayes Factor" model comparison score (BF) to assess the relative performance of each model.
+
+``` {r}
+performance::compare_performance(mod1, mod2, mod3, rank = TRUE) %>% knitr::kable()
+```
+
+While model 3 is better than model 1, we can see here that model 1 is already explaining a very large amount of the variation in arrival delay, i.e. arrival delay is largely determined by departure delay.
+
+Let's merge in the weather data to see if that influences departure delay:
+
+``` {r}
+flights2 <- flights %>%
+  left_join(nycflights13::weather)
+
+glimpse(flights2)
+```
+
+Let's see how weather affects departure delay
+
+``` {r}
+mod4 <- lm(dep_delay ~ temp + wind_speed + precip + visib,
+           data = flights2)
+performance::performance(mod4) %>% knitr::kable()
+broom::tidy(mod4) %>% knitr::kable()
+```
+
+This model only accounts for a very small proportion of the variation in flight departure delays. However it does show that every inch of precipiation is associated with `r mod4$coefficients["precip"]` minute impact on departure delay. Let's add hour and month again to see if that tells us more about departure delays.
+
+``` {r}
+mod5 <- lm(dep_delay ~ temp + wind_speed + precip + visib + hour + month, 
+           data = flights2)
+performance::compare_performance(mod4, mod5, rank = TRUE) %>% knitr::kable()
+```
+
+Model 5 is an improvement over model 4, but it still only accounts for a small proportion of the variation in departure delay.
+
+# Logistic regression
+Linear regression works for continuous variables, but what if we want to look the relationship between independent variables and a dependent binary variable. In this case we use logistic regression, this converts the binary variable into a logistic function to investigate the relationship of variables on the 'probability of success'.
+
+First let's define some binary variables:
+
+* `delayed_departure`: if there is a departure delay
+* `delayed_arrival`: if there is a delayed arrival
+
+```{r}
+flights3 <- flights2 %>%
+  mutate(
+    delayed_departure = as.numeric(dep_delay > 0),
+    delayed_arrival = as.numeric(arr_delay > 0)
+  )
+```
+
+Let's see if weather influences if there is any sort of departure delay. We do this using the `stats::glm()` function, we also need to define the 'family'. For a logistic regression we can just use the argument `family = "binomial"`, for probit regression use `family = binomial(link = "probit)`. As with `lm()` models, you can run `summary()` on the model to see the outputs. The `performance::performance()` function can tell us about the performance of the model, including the pseudo R-square.
+
+``` {r}
+log_mod1 <- glm(delayed_departure ~ temp + wind_speed + precip + visib, 
+                data = flights3,
+                family = "binomial")
+summary(log_mod1)
+performance::performance(log_mod1) %>% knitr::kable()
+```
+
+We can also use `broom:tidy()` to produce a tidy output from the model. For logistic regression we usually want to convert the coefficient into odds-ratios, we can do this be caling the `exponentiate` argument.
+
+``` {r}
+broom::tidy(log_mod1, exponentiate = TRUE) %>% knitr::kable()
+```
+
+Let's extend our model to see if hour and month of departure affect departure delay, and compare if it improves performance.
+
+``` {r}
+log_mod2 <- glm(delayed_departure ~ temp + wind_speed + precip + visib + hour + month, 
+                data = flights3, 
+                family = "binomial")
+performance::compare_performance(log_mod1, log_mod2, rank = TRUE) %>% knitr::kable()
+```
+
+We can see that adding the hour and month of departure notably increases the model performance. Let's look at the coefficients:
+
+``` {r}
+broom::tidy(log_mod2, exponentiate = TRUE) %>% knitr::kable()
+```
+
+We can see that the odds-ratio for preciptation has been reduced as a result of the inclusion of the new terms, however it remains the largest determinant of delay. However, hour has an odds ratio of `r exp(log_mod2$coefficients["hour"])`, suggesting that the later in the day a flight is scheduled to depart the more likely that it will experience a delay.
+
+
